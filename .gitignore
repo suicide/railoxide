@@ -21,9 +21,14 @@
 # Docker
 docker-compose.override.yml
 
+# Isolated sandbox data
+/data/
+
 # Secrets and keys
 *.pem
 *.key
 *.crt
 .env
 .env.*
+.envrc
+.direnv/
