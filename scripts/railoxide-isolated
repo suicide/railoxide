@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# railoxide-isolated — Run RailOxide in a bubblewrap sandbox with no access
+# to your home directory, /root, or other personal data.
+
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+DATA_DIR="${RAILOXIDE_DATA:-$SCRIPT_DIR/../data}"
+BINARY="${RAILOXIDE_BINARY:-railoxide}"
+DISPLAY="${DISPLAY:-}"
+WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: railoxide-isolated [-- <wallet-args>...]
+
+Run the RailOxide wallet inside a bubblewrap sandbox:
+  - /home, /root, and /run/user are empty tmpfs mounts
+  - /tmp is a private tmpfs
+  - The Nix store is exposed read-only for dynamic libraries
+  - Only X11/Wayland sockets and GPU devices are forwarded
+  - All data is stored in RAILOXIDE_DATA (default: data/ inside the project)
+
+Environment variables:
+  RAILOXIDE_BINARY  Path or name of the railoxide binary (default: railoxide)
+  RAILOXIDE_DATA    Data directory to bind-mount into the sandbox
+                    (default: data/ inside the project)
+
+Examples:
+  railoxide-isolated
+  RAILOXIDE_DATA=/secure/railoxide-data railoxide-isolated
+  railoxide-isolated -- --db-path /data
+EOF
+  exit 0
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && usage
+
+WALLET_ARGS=()
+if [[ $# -gt 0 ]]; then
+  WALLET_ARGS=("$@")
+fi
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+command_exists bwrap || die 'bwrap (bubblewrap) is not installed. Run: nix run nixpkgs#bubblewrap'
+
+if ! command -v "$BINARY" >/dev/null 2>&1; then
+  die "'$BINARY' not found. Build the wallet first or set RAILOXIDE_BINARY."
+fi
+
+BINARY_PATH="$(realpath "$(command -v "$BINARY")")"
+WAYLAND_LIBDIR="$(pkg-config --variable=libdir wayland-client)"
+SYSTEM_CA_BUNDLE="$(readlink -f /etc/ssl/certs/ca-bundle.crt 2>/dev/null || true)"
+LD_LIBRARY_PATH_VALUE="$WAYLAND_LIBDIR"
+VULKAN_LIBDIR="$(pkg-config --variable=libdir vulkan 2>/dev/null || true)"
+
+if [[ -n "$VULKAN_LIBDIR" ]]; then
+  LD_LIBRARY_PATH_VALUE="$LD_LIBRARY_PATH_VALUE:$VULKAN_LIBDIR"
+fi
+
+if [[ -d /run/opengl-driver/lib ]]; then
+  LD_LIBRARY_PATH_VALUE="$LD_LIBRARY_PATH_VALUE:/run/opengl-driver/lib"
+fi
+
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+  LD_LIBRARY_PATH_VALUE="$LD_LIBRARY_PATH_VALUE:$LD_LIBRARY_PATH"
+fi
+
+if [[ -z "$DISPLAY" && -z "$WAYLAND_DISPLAY" ]]; then
+  die 'Neither DISPLAY nor WAYLAND_DISPLAY is set. Running outside a graphical session?'
+fi
+
+mkdir -p "$DATA_DIR"
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# Phase 1: Isolation base — empty tmpfs mounts go first
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+BWRAP=(
+  bwrap
+  --unshare-ipc
+  --unshare-pid
+  --unshare-uts
+  --unshare-cgroup-try
+  --share-net
+  --hostname railoxide
+
+  # Empty personal directories (must come before overlay binds)
+  --tmpfs /home
+  --tmpfs /root
+  --tmpfs /run/user
+  --tmpfs /tmp
+  --tmpfs /var/tmp
+
+  # System essentials (read-only)
+  --proc /proc
+)
+
+# Reconstruct directory tree for the binary under the empty /home tmpfs,
+# so the binary can live at its original absolute path and its ELF RUNPATH
+# still resolves (e.g. $ORIGIN/../lib relative entries).
+binary_parent="$(dirname "$BINARY_PATH")"
+IFS='/' read -ra path_parts <<< "${binary_parent#/}"
+current=""
+for part in "${path_parts[@]}"; do
+  current="$current/$part"
+  BWRAP+=(--dir "$current")
+done
+BWRAP+=(--ro-bind "$BINARY_PATH" "$BINARY_PATH")
+
+[[ -d /sys/class    ]] && BWRAP+=(--ro-bind /sys/class    /sys/class)
+[[ -d /sys/dev/char ]] && BWRAP+=(--ro-bind /sys/dev/char /sys/dev/char)
+[[ -d /sys/devices  ]] && BWRAP+=(--ro-bind /sys/devices  /sys/devices)
+
+for etc_file in passwd group resolv.conf; do
+  [[ -f "/etc/$etc_file" ]] && BWRAP+=(--ro-bind "/etc/$etc_file" "/etc/$etc_file")
+done
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# Phase 2: Host resources (Nix store, GPU, data) — overlay on top of tmpfs
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# Sandbox scratch space for the Wayland socket (unaffected by /run/user tmpfs)
+BWRAP+=(--dir "/run/railoxide")
+
+BWRAP+=(
+  # Nix store and runtime linker
+  --ro-bind /nix/store /nix/store
+)
+
+[[ -d /run/current-system ]] && BWRAP+=(--ro-bind /run/current-system /run/current-system)
+[[ -d /run/opengl-driver  ]] && BWRAP+=(--ro-bind /run/opengl-driver  /run/opengl-driver)
+
+# GPU
+[[ -d /dev/dri ]] && BWRAP+=(--dev-bind /dev/dri /dev/dri)
+
+# Fonts
+[[ -d /etc/fonts ]] && BWRAP+=(--ro-bind /etc/fonts /etc/fonts)
+
+# Data directory
+BWRAP+=(--bind "$DATA_DIR" "$DATA_DIR")
+
+# Optional: hardware wallet USB devices
+[[ -e /dev/bus/usb ]] && BWRAP+=(--dev-bind /dev/bus/usb /dev/bus/usb)
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# Phase 3: Display sockets — create dirs on tmpfs, then overlay binds
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+# X11
+if [[ -n "$DISPLAY" ]]; then
+  BWRAP+=(--setenv DISPLAY "$DISPLAY")
+  if [[ -d /tmp/.X11-unix ]]; then
+    BWRAP+=(--dir /tmp/.X11-unix)
+    BWRAP+=(--ro-bind /tmp/.X11-unix /tmp/.X11-unix)
+  fi
+fi
+
+# Wayland — socket goes into /run/railoxide since /run/user is tmpfs
+if [[ -n "$WAYLAND_DISPLAY" ]]; then
+  xdg_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  wayland_socket="$xdg_runtime/$WAYLAND_DISPLAY"
+  wayland_lock="$xdg_runtime/wayland-1.lock"
+
+  if [[ -e "$wayland_socket" ]]; then
+    BWRAP+=(--ro-bind "$wayland_socket" "/run/railoxide/$WAYLAND_DISPLAY")
+  fi
+  if [[ -e "$wayland_lock" ]]; then
+    BWRAP+=(--ro-bind "$wayland_lock" "/run/railoxide/wayland-1.lock")
+  fi
+
+  BWRAP+=(--setenv WAYLAND_DISPLAY "$WAYLAND_DISPLAY")
+  BWRAP+=(--setenv XDG_RUNTIME_DIR "/run/railoxide")
+fi
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# Phase 4: Environment and exec
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+BWRAP+=(
+  --setenv HOME             "/tmp"
+  --setenv XDG_DATA_HOME    "$DATA_DIR"
+  --setenv XDG_CONFIG_HOME  "$DATA_DIR/config"
+  --setenv XDG_CACHE_HOME   "$DATA_DIR/cache"
+  --setenv XDG_STATE_HOME   "$DATA_DIR/state"
+  --setenv LD_LIBRARY_PATH  "$LD_LIBRARY_PATH_VALUE"
+  --setenv SSL_CERT_FILE    "$SYSTEM_CA_BUNDLE"
+  --setenv NIX_SSL_CERT_FILE "$SYSTEM_CA_BUNDLE"
+  --setenv RUST_LOG         "${RUST_LOG:-info}"
+)
+
+BWRAP+=("$BINARY_PATH" --db-path "$DATA_DIR" "${WALLET_ARGS[@]}")
+
+exec "${BWRAP[@]}"

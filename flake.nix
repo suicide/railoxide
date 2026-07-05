@@ -203,6 +203,8 @@
                 libusb1
                 eudev
                 hidapi
+                bubblewrap
+                just
               ])
             else if isDarwin then
               darwinBuildInputs
