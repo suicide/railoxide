@@ -1,14 +1,11 @@
 # RailOxide development helpers.
 #
-# Usage:
-#   just build                    Build the wallet release binary
-#   just run-isolated             Run inside a bwrap sandbox (no home access)
-#   just build-and-run            Build, then run isolated
-#   just clean-data               Wipe isolated data
-#   just ls-data                  List files in isolated data dir
-#
 # Prerequisites (run once or use nix run nixpkgs#<tool>):
 #   nix profile install nixpkgs#bubblewrap
+
+# Show all available commands.
+default:
+    @just --list --unsorted
 
 # Path to the wallet binary. Override with: just run-isolated binary=./my-bin
 binary := "target/release/wallet"
@@ -30,6 +27,17 @@ run-isolated:
       exit 1
     fi
     exec env RAILOXIDE_BINARY="{{binary}}" RAILOXIDE_DATA="{{data_dir}}" scripts/railoxide-isolated
+
+# Build the wallet debug binary.
+build-debug:
+    cargo build -p wallet
+
+# Run the wallet debug binary in isolation.
+run-debug:
+    just binary="target/debug/wallet" run-isolated
+
+# Build debug and run isolated in one step.
+build-and-run-debug: build-debug run-debug
 
 # Build and run isolated in one step.
 build-and-run: build
