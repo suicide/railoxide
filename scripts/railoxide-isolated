@@ -74,6 +74,58 @@ if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
   LD_LIBRARY_PATH_VALUE="$LD_LIBRARY_PATH_VALUE:$LD_LIBRARY_PATH"
 fi
 
+# Host GPU drivers (Mesa/LLVM) are built against the system glibc, which can be
+# newer than the glibc the wallet was built with. dlopen of the Vulkan ICD then
+# fails with "version `GLIBC_x.y' not found", wgpu reports no adapters, and the
+# window never opens. Detect that skew and relaunch through the host glibc's
+# dynamic loader so the driver's symbol versions resolve.
+HOST_LDSO=""
+
+glibc_version_of() {
+  # Extract "2.44-25" from a /nix/store/<hash>-glibc-2.44-25/lib/libc.so.6 path.
+  local dir
+  dir="$(basename "$(dirname "$(dirname "$1")")")"
+  [[ "$dir" == *glibc-* ]] || return 1
+  printf '%s\n' "${dir##*glibc-}"
+}
+
+if command_exists readelf && command_exists ldd; then
+  binary_ldso="$(readelf -l "$BINARY_PATH" 2>/dev/null | sed -n 's/.*Requesting program interpreter: \(.*\)\]/\1/p')"
+  binary_glibc="$(glibc_version_of "$binary_ldso" 2>/dev/null || true)"
+
+  host_glibc=""
+  host_glibc_dir=""
+  for icd in /run/opengl-driver/share/vulkan/icd.d/*.json; do
+    [[ -f "$icd" ]] || continue
+    icd_lib="$(sed -n 's/.*"library_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$icd" | head -n1)"
+    [[ -f "$icd_lib" ]] || continue
+    # Skip foreign-architecture ICDs (e.g. 32-bit) that ldd cannot inspect.
+    [[ "$(readelf -h "$icd_lib" 2>/dev/null | sed -n 's/.*Class: *//p')" == *64* ]] || continue
+    icd_libc="$(ldd "$icd_lib" 2>/dev/null | sed -n 's/.*libc\.so\.6 => \([^ ]*\).*/\1/p' | head -n1)"
+    icd_glibc="$(glibc_version_of "$icd_libc" 2>/dev/null || true)"
+    [[ -n "$icd_glibc" ]] || continue
+    if [[ -z "$host_glibc" ]] ||
+      [[ "$(printf '%s\n%s\n' "$host_glibc" "$icd_glibc" | sort -V | tail -n1)" == "$icd_glibc" ]]; then
+      host_glibc="$icd_glibc"
+      host_glibc_dir="$(dirname "$(dirname "$icd_libc")")"
+    fi
+  done
+
+  if [[ -n "$binary_glibc" && -n "$host_glibc" ]] &&
+    [[ "$host_glibc" != "$binary_glibc" ]] &&
+    [[ "$(printf '%s\n%s\n' "$binary_glibc" "$host_glibc" | sort -V | tail -n1)" == "$host_glibc" ]]; then
+    for candidate in "$host_glibc_dir"/lib/ld-linux*.so.* "$host_glibc_dir"/lib/ld-*.so.*; do
+      if [[ -x "$candidate" ]]; then
+        HOST_LDSO="$candidate"
+        break
+      fi
+    done
+    if [[ -n "$HOST_LDSO" ]]; then
+      LD_LIBRARY_PATH_VALUE="$host_glibc_dir/lib:$LD_LIBRARY_PATH_VALUE"
+    fi
+  fi
+fi
+
 if [[ -z "$DISPLAY" && -z "$WAYLAND_DISPLAY" ]]; then
   die 'Neither DISPLAY nor WAYLAND_DISPLAY is set. Running outside a graphical session?'
 fi
@@ -197,6 +249,10 @@ BWRAP+=(
   --setenv RUST_LOG         "${RUST_LOG:-info}"
 )
 
-BWRAP+=("$BINARY_PATH" --db-path "$DATA_DIR" "${WALLET_ARGS[@]}")
+if [[ -n "$HOST_LDSO" ]]; then
+  BWRAP+=("$HOST_LDSO" --library-path "$LD_LIBRARY_PATH_VALUE" "$BINARY_PATH" --db-path "$DATA_DIR" "${WALLET_ARGS[@]}")
+else
+  BWRAP+=("$BINARY_PATH" --db-path "$DATA_DIR" "${WALLET_ARGS[@]}")
+fi
 
 exec "${BWRAP[@]}"
