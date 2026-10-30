@@ -1505,6 +1505,41 @@ fn public_broadcaster_bound_min_gas_price_is_zero_on_arbitrum() {
 }
 
 #[test]
+fn arbitrum_transact_params_carry_the_quoted_gas_price_not_the_contract_bound() {
+    use alloy::sol_types::SolCall;
+    use broadcaster_core::contracts::railgun::transactCall;
+
+    let (mut candidate, _) = sample_public_broadcaster_candidate(9);
+    candidate.chain_id = 42161;
+    let quoted_gas_price = 21_000_000u128;
+
+    assert_eq!(
+        public_broadcaster_bound_min_gas_price(42161, quoted_gas_price),
+        0
+    );
+
+    let params = public_broadcaster_transact_params(
+        &candidate,
+        TransactionRequest::default()
+            .to(address(0x33))
+            .gas_limit(210_000)
+            .input(
+                transactCall {
+                    _transactions: Vec::new(),
+                }
+                .abi_encode()
+                .into(),
+            ),
+        quoted_gas_price,
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    // The broadcaster uses this price to submit, so a zero bound must not leak onto the wire.
+    assert_eq!(params.min_gas_price, Some(U256::from(quoted_gas_price)));
+}
+
+#[test]
 fn approximate_shapes_include_broadcaster_fee_output_and_change() {
     let send_selection = selection_info(uint!(15_U256), 2, 1, 3, 0, uint!(13_U256));
     let send = send_approximate_shape(&send_selection, uint!(13_U256));

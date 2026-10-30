@@ -1245,7 +1245,7 @@ pub(super) async fn submit_public_broadcaster_plan(
         transaction,
         pre_transaction_pois_per_txid_leaf_per_list,
         &broadcaster,
-        bound_min_gas_price,
+        min_gas_price,
         progress_tx,
         timeout,
         republish_interval,
@@ -1279,12 +1279,17 @@ pub(super) async fn submit_public_broadcaster_plan(
 
 /// Publish an admitted complete transaction and its POIs through the existing
 /// encrypted request/response transport. Dropping the future stops local retries.
+///
+/// `min_gas_price` is the broadcaster's request price, not the proved
+/// `boundParams.minGasPrice`. The two differ on Arbitrum, where the contract bound is
+/// zero to keep `eth_estimateGas` from rejecting the proven transaction while the
+/// broadcaster still needs a real price to submit with.
 pub(super) async fn submit_public_broadcaster_transaction(
     waku: Arc<WakuClient>,
     transaction: TransactionRequest,
     pre_transaction_pois_per_txid_leaf_per_list: PreTransactionPoiMap,
     broadcaster: &PublicBroadcasterCandidate,
-    bound_min_gas_price: u128,
+    min_gas_price: u128,
     progress_tx: Option<TransactionGenerationProgressSender>,
     timeout: Duration,
     republish_interval: Duration,
@@ -1298,7 +1303,7 @@ pub(super) async fn submit_public_broadcaster_transaction(
     let params = public_broadcaster_transact_params(
         broadcaster,
         transaction,
-        bound_min_gas_price,
+        min_gas_price,
         pre_transaction_pois_per_txid_leaf_per_list,
     )?;
     let encrypt_started = Instant::now();
