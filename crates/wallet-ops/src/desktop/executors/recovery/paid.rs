@@ -666,7 +666,7 @@ impl ExecutorOwner {
                     transaction,
                     pois.request_pois,
                     candidate,
-                    bound_min_gas_price,
+                    min_gas_price,
                     progress_tx.cloned(),
                     route_tx.cloned(),
                     response_timeout,

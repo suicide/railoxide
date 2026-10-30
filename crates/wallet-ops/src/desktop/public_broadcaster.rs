@@ -636,12 +636,16 @@ pub const fn public_broadcaster_service_gas_price(min_gas_price: u128) -> u128 {
     min_gas_price * 125 / 100
 }
 
+/// Gas price to prove into `boundParams.minGasPrice`, which is separate from the price
+/// requested from the broadcaster.
 #[must_use]
 pub const fn public_broadcaster_bound_min_gas_price(chain_id: u64, min_gas_price: u128) -> u128 {
     match chain_id {
         // Arbitrum eth_call/eth_estimateGas exposes the current child-chain gas price as
         // tx.gasprice, even when a higher legacy gasPrice is supplied. The RAILGUN contract
         // documents minGasPrice as type-0-only, so bind zero on Arbitrum and keep pricing separate.
+        // The broadcaster request still carries the quoted price: a zero there is rejected as
+        // too low and would otherwise be the gas price it submits with.
         42_161 | 42_170 | 421_614 => 0,
         _ => min_gas_price,
     }

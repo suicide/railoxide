@@ -1200,7 +1200,7 @@ pub(super) async fn submit_public_broadcaster_plan(
         transaction,
         pre_transaction_pois_per_txid_leaf_per_list,
         &broadcaster,
-        bound_min_gas_price,
+        min_gas_price,
         progress_tx,
         route_tx,
         timeout,
@@ -1237,12 +1237,17 @@ pub(super) async fn submit_public_broadcaster_plan(
 /// encrypted request/response transport, on a Waku node of the submission's own.
 /// Dropping the future stops local retries and retires the node through its teardown delay,
 /// which a closed scope ends at once. Every exit leaves the route `Closed`.
+///
+/// `min_gas_price` is the broadcaster's request price, not the proved
+/// `boundParams.minGasPrice`. The two differ on Arbitrum, where the contract bound is
+/// zero to keep `eth_estimateGas` from rejecting the proven transaction while the
+/// broadcaster still needs a real price to submit with.
 pub(crate) async fn submit_public_broadcaster_transaction(
     waku: &PublicBroadcasterWaku,
     transaction: TransactionRequest,
     pre_transaction_pois_per_txid_leaf_per_list: PreTransactionPoiMap,
     broadcaster: &PublicBroadcasterCandidate,
-    bound_min_gas_price: u128,
+    min_gas_price: u128,
     progress_tx: Option<TransactionGenerationProgressSender>,
     route_tx: Option<SubmissionRouteSender>,
     timeout: Duration,
@@ -1258,7 +1263,7 @@ pub(crate) async fn submit_public_broadcaster_transaction(
     let params = public_broadcaster_transact_params(
         broadcaster,
         transaction,
-        bound_min_gas_price,
+        min_gas_price,
         pre_transaction_pois_per_txid_leaf_per_list,
     )?;
     let encrypt_started = Instant::now();
